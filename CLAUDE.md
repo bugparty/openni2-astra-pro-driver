@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Index
+
+- [Repository Overview](#repository-overview)
+- [Build Commands](#build-commands)
+- [Architecture](#architecture)
+- [Key Patterns](#key-patterns)
+- [Comparison Harness](#comparison-harness)
+
 ## Repository Overview
 
 This is the **openni2-astra-driver** — a source-built OpenNI2 driver for the Orbbec Astra Pro depth camera (VID=0x2bc5, PID=0x0403). It replaces Orbbec's proprietary `liborbbec.so` with an open-source implementation that can be modified and rebuilt.
