@@ -1,7 +1,9 @@
 #include "UsbDevice.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <algorithm>
 
 static constexpr uint16_t ASTRA_VID = 0x2bc5;
 static constexpr uint16_t ASTRA_PID = 0x0403;
@@ -361,6 +363,22 @@ void UsbDevice::bulkReadLoop(int endpoint)
     size_t totalBytes = 0;
     int bulkDiagCount = 0;
 
+    // Diagnostic: dump raw bulk bytes from this endpoint to file
+    // Set ASTRA_DUMP_BULK_<HEX>=<path> e.g. ASTRA_DUMP_BULK_81=/tmp/depth.bin
+    char envName[32];
+    snprintf(envName, sizeof(envName), "ASTRA_DUMP_BULK_%02X", endpoint & 0xFF);
+    const char* dumpPath = getenv(envName);
+    FILE* dumpFp = nullptr;
+    size_t dumpLimit = 1 * 1024 * 1024;  // 1 MB cap
+    size_t dumpWritten = 0;
+    if (dumpPath) {
+        dumpFp = fopen(dumpPath, "wb");
+        if (dumpFp) {
+            fprintf(stderr, "DIAG bulk ep=0x%02x dumping up to %zu bytes to %s\n",
+                    endpoint, dumpLimit, dumpPath);
+        }
+    }
+
     auto it = bulkReads_.find(endpoint);
     if (it == bulkReads_.end()) {
         delete[] buf;
@@ -376,6 +394,18 @@ void UsbDevice::bulkReadLoop(int endpoint)
         attempts++;
 
         if (rc == 0 && transferred > 0) {
+            if (dumpFp && dumpWritten < dumpLimit) {
+                size_t toWrite = std::min((size_t)transferred, dumpLimit - dumpWritten);
+                fwrite(buf, 1, toWrite, dumpFp);
+                dumpWritten += toWrite;
+                if (dumpWritten >= dumpLimit) {
+                    fflush(dumpFp);
+                    fclose(dumpFp);
+                    dumpFp = nullptr;
+                    fprintf(stderr, "DIAG bulk ep=0x%02x dump complete (%zu bytes)\n",
+                            endpoint, dumpWritten);
+                }
+            }
             state.callback(buf, transferred);
             totalReads++;
             totalBytes += transferred;

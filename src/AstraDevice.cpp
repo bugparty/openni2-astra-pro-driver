@@ -9,6 +9,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <vector>
 #include <cmath>
 #include <algorithm>
 
@@ -443,29 +446,53 @@ void AstraDevice::computeShiftToDepthTable()
     const double nConstShift  = -1171.4247; // constant shift (raw, before *nParamCoeff)
     const double nShiftScale  = 1.0;
     const double minCutoff    = 300.0;      // minimum depth (mm)
-    const double maxCutoff    = 10000.0;    // maximum depth (mm)
+    const double maxCutoff    = 8000.0;     // hardware ceiling (Astra Pro spec)
+    // Reject LUT entries where one unit of shift quantization produces too
+    // large a depth step — past this point a 1-shift noise event dominates
+    // the measurement. d(depth)/d(shift) = depth^2 * (dpps/nParamCoeff)
+    // / (ZPD * EmitterD). With Astra Pro VGA constants (dpps=0.06,
+    // nParamCoeff=4, ZPD=100, EmitterD=51) this corresponds to depth ≈
+    // sqrt(maxQuantizationMm * 340000):
+    //   5 mm/shift → ~1.3 m,  10 mm/shift → ~1.8 m,  20 mm/shift → ~2.6 m.
+    // The pristine Orbbec driver effectively enforces ~6 mm/shift on this fw.
+    const double maxQuantizationMm = 8.0;
 
     // VGA (640x480) uses pixelSizeFactor=2
     const int pixelSizeFactor = 2;
     double dPlanePixelSize = ZPPS * pixelSizeFactor;
     double nConstShiftEffective = (nParamCoeff * nConstShift) / pixelSizeFactor;
 
+    const double dShiftStep = dPlanePixelSize / nParamCoeff;  // d(metric)/d(shift)
     for (int s = 1; s < maxShift; s++) {
         double refX = (s - nConstShiftEffective) / nParamCoeff - 0.375;
         double metric = refX * dPlanePixelSize;
         if (metric < 0.0 || metric >= EmitterD)
             continue;
         double depth = nShiftScale * (metric * ZPD / (EmitterD - metric) + ZPD);
-        if (depth >= minCutoff && depth < maxCutoff)
-            m_s2dTable[s] = static_cast<uint16_t>(depth);
+        if (depth < minCutoff || depth >= maxCutoff)
+            continue;
+        // Quantization: d(depth)/d(shift) = depth^2 * dShiftStep / (ZPD*EmitterD)
+        double quantMm = depth * depth * dShiftStep / (ZPD * EmitterD);
+        if (quantMm > maxQuantizationMm)
+            continue;
+        m_s2dTable[s] = static_cast<uint16_t>(depth);
     }
 }
 
 bool AstraDevice::readCameraParams()
 {
-    // S2D conversion now uses the PrimeSense triangulation formula with
-    // fitted parameters (see computeShiftToDepthTable). Camera params
-    // from flash are not needed for the basic depth pipeline.
+    // Calibration source on Astra Pro fw 0xe752: NOT plain flash.
+    //   - flash @ 0x70000 (official driver's primary target) returns all 0xFF
+    //   - flash @ 0x10000 is firmware code, not params
+    //   - ALG_DEPTH_INFO returns 2 bytes (count/flag)
+    // The official driver (XnSensor::GetCameraParam @ 0x457e0) takes a
+    // chip-ID-dependent branch: if chip_id == 0x06, it uses
+    // XnHostProtocolI2CReadFlash (a separate I2C-bus protocol) instead of
+    // the direct flash read. Implementing that path would unlock proper
+    // forcalllength/baseline/fittingCoeff/nShiftScale, eliminating the ~1.5 %
+    // S2D bias relative to the official driver. Until then we rely on the
+    // hardcoded PrimeSense-fit constants in computeShiftToDepthTable.
+    // See docs/official-driver-s2d-formula.md.
     return true;
 }
 
@@ -502,12 +529,20 @@ bool AstraDevice::configureDepthStream(int width, int height, int fps)
     // Our DepthProcessor uses a different internal enum:
     //   0 = PSCompressed, 1 = Packed11, 2 = Uncompressed16
     // Firmware format and decoder format must match.
-    // Try Packed11 (firmware fmt 3) — PSCompressed (fmt 1) on this fw 0xe752
-    // produces nibble streams dominated by 0x0 (mostly zero bytes), which the
-    // PrimeSense PSCompressed decoder collapses to ~LUT[1]. Packed11 worked in
-    // earlier sessions on the same hardware.
-    m_fwCmd->setDepthFormat(3);     // 3 = XN_IO_DEPTH_FORMAT_PACKED_11_BIT
-    m_depthProc->setDepthFormat(1);  // 1 = Packed11 (our internal enum)
+    // Default Packed11 (fw fmt 3) — PSCompressed (fw fmt 1) on this fw 0xe752
+    // produces nibble streams dominated by 0x0, decoding to garbage. Override
+    // for diagnostics with ASTRA_DEPTH_FORMAT={ps,p11,u16}.
+    int fwFmt = 3, decFmt = 1;  // Packed11
+    const char* fmtEnv = getenv("ASTRA_DEPTH_FORMAT");
+    if (fmtEnv) {
+        if (strcmp(fmtEnv, "ps") == 0)        { fwFmt = 1; decFmt = 0; }
+        else if (strcmp(fmtEnv, "u16") == 0)  { fwFmt = 0; decFmt = 2; }
+        else if (strcmp(fmtEnv, "p11") == 0)  { fwFmt = 3; decFmt = 1; }
+        fprintf(stderr, "AstraDevice: ASTRA_DEPTH_FORMAT=%s -> fw=%d dec=%d\n",
+                fmtEnv, fwFmt, decFmt);
+    }
+    m_fwCmd->setDepthFormat(static_cast<uint16_t>(fwFmt));
+    m_depthProc->setDepthFormat(decFmt);
 
     if (!m_fwCmd->setDepthResolution(fwRes)) {
         fprintf(stderr, "AstraDevice: setDepthResolution(%d) failed\n", fwRes);
