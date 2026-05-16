@@ -408,8 +408,7 @@ void AstraDevice::buildSensorInfos()
     // IR modes: 320x240@30, 320x240@60, 640x480@30, 1280x1024@30
     m_irModes[0] = {ONI_PIXEL_FORMAT_GRAY16, 320, 240, 30};
     m_irModes[1] = {ONI_PIXEL_FORMAT_GRAY16, 320, 240, 60};
-    m_irModes[2] = {ONI_PIXEL_FORMAT_GRAY16, 640, 480, 30};
-    m_irModes[3] = {ONI_PIXEL_FORMAT_GRAY8, 1280, 1024, 30};
+    m_irModes[2] = {ONI_PIXEL_FORMAT_GRAY8, 1280, 1024, 30};
 
     m_sensorInfos[1].sensorType = ONI_SENSOR_IR;
     m_sensorInfos[1].numSupportedVideoModes = NUM_IR_MODES;
@@ -422,61 +421,76 @@ void AstraDevice::buildSensorInfos()
 
 void AstraDevice::computeShiftToDepthTable()
 {
-    // Compute shift-to-depth lookup table using PrimeSense triangulation formula.
-    // Each shift value from the depth sensor maps to a distance in mm via:
-    //   nConstShift_effective = (nParamCoeff * nConstShift_raw) / pixelSizeFactor
-    //   refX   = (shift - nConstShift_effective) / nParamCoeff - 0.375
-    //   metric = refX * (ZPPS * pixelSizeFactor)
-    //   depth  = shiftScale * (metric * ZPD / (EmitterD - metric) + ZPD)
+    // PrimeSense ShiftToDepth formula, constants harvested from the official
+    // liborbbec.so log output on this device (Astra Pro fw 0xe752):
     //
-    // pixelSizeFactor depends on resolution:
-    //   SXGA (1280x1024) = 1, VGA (640x480) = 2
+    //   ParamCoeff = 4, ConstShift = 200, ShiftScale = 10 (but =1 for DEPTH_1_MM)
+    //   ZPD  = 130.0    (Depth.ZPD,  zero-plane distance, mm)
+    //   ZPPS = 0.113967 (Depth.ZPPS, zero-plane pixel size, mm)
+    //   LDDIS (DCL) = 7.5  (Depth.LDDIS, emitter-DCmos baseline, mm)
     //
-    // Astra Pro VGA at nParamCoeff=4 gives 1022 valid entries (shift 3-1024).
-    // With nParamCoeff=1 we only got 511 valid entries (shift 1-511), causing
-    // ~35% zero pixels ("flower screen" / garbled display).
+    // Reference: openni-sensor-primesense/Source/XnDDK/XnShiftToDepth.cpp:48-103
+    // The official driver on chip_id==6 reaches the "Sensor params invalid
+    // (NaN value)" branch (flash 0x70000 is all-0xFF) and falls back to this
+    // PrimeSense formula — NOT the stereo `focalBL/(C-s)` formula we used to
+    // hand-fit. The formula has a NARROW valid shift window (e.g. [400, 533]
+    // at VGA); shifts outside it correctly map to 0 (NO_DEPTH), which is why
+    // the official driver shows the scene's true max depth instead of
+    // assigning bogus values to every pixel.
+    //
+    // DIAGNOSTIC (2026-05-15): Raw shift data spans [1, ~2032].
+    // The old PrimeSense formula with ConstShift=800 only covers [1602,1711].
+    // This is because dMetric < DCL=7.5 constrains shift to < 1710.
+    //
+    // The official formula uses disparity = (fittingCoeff - s) / nShiftScale,
+    // where fittingCoeff is slightly above max shift. Depth = focalBL/disparity.
+    //
+    // Calibrated to match: at shift=512, depth~1300mm; at shift=2047, depth~300mm
+    // Reference: docs/official-driver-s2d-formula.md
 
     const int maxShift = 2048;
     m_s2dTable.resize(maxShift, 0);
 
-    const double ZPD          = 100.0;     // zero plane distance (mm)
-    const double ZPPS          = 0.03;      // zero plane pixel size (mm, raw from flash)
-    const double EmitterD     = 51.0;      // emitter-to-CMOS baseline (mm)
-    const double nParamCoeff  = 4.0;       // parameter coefficient (from flash)
-    const double nConstShift  = -1171.4247; // constant shift (raw, before *nParamCoeff)
-    const double nShiftScale  = 1.0;
-    const double minCutoff    = 300.0;      // minimum depth (mm)
-    const double maxCutoff    = 8000.0;     // hardware ceiling (Astra Pro spec)
-    // Reject LUT entries where one unit of shift quantization produces too
-    // large a depth step — past this point a 1-shift noise event dominates
-    // the measurement. d(depth)/d(shift) = depth^2 * (dpps/nParamCoeff)
-    // / (ZPD * EmitterD). With Astra Pro VGA constants (dpps=0.06,
-    // nParamCoeff=4, ZPD=100, EmitterD=51) this corresponds to depth ≈
-    // sqrt(maxQuantizationMm * 340000):
-    //   5 mm/shift → ~1.3 m,  10 mm/shift → ~1.8 m,  20 mm/shift → ~2.6 m.
-    // The pristine Orbbec driver effectively enforces ~6 mm/shift on this fw.
-    const double maxQuantizationMm = 8.0;
+    // Device constants captured from liborbbec.so XnShiftToDepthConfig at runtime
+    // via gdb (Astra Pro fw 0xe752). pixelSizeFactor=1 was THE bug — VGA does
+    // not use factor=2 on this device. Output ShiftScale=10 means LUT outputs
+    // in 0.1mm units; we divide by 10 to keep DEPTH_1_MM semantics.
+    const int    ParamCoeff      = 4;
+    const int    ConstShift      = 200;
+    const int    ShiftScale      = 10;        // matches official; we /10 below
+    const double ZPD             = 130.0;     // mm
+    const double ZPPS            = 0.113967;  // mm
+    const double DCL             = 7.5;       // mm (LDDIS)
+    const int    pixelSizeFactor = 1;         // official uses 1 even for VGA
 
-    // VGA (640x480) uses pixelSizeFactor=2
-    const int pixelSizeFactor = 2;
-    double dPlanePixelSize = ZPPS * pixelSizeFactor;
-    double nConstShiftEffective = (nParamCoeff * nConstShift) / pixelSizeFactor;
+    const uint16_t MIN_DEPTH = 0;         // mm — official sets MinCutOff=0
+    const uint16_t MAX_DEPTH = 65534;     // mm — official sets MaxCutOff=65534
 
-    const double dShiftStep = dPlanePixelSize / nParamCoeff;  // d(metric)/d(shift)
+    // PrimeSense formula transforms
+    const double nConstShiftEff = (double)(ParamCoeff * ConstShift) / pixelSizeFactor;
+    const double planePixelSize = ZPPS * pixelSizeFactor;
+
+    int validCount = 0, minShiftValid = maxShift, maxShiftValid = 0;
     for (int s = 1; s < maxShift; s++) {
-        double refX = (s - nConstShiftEffective) / nParamCoeff - 0.375;
-        double metric = refX * dPlanePixelSize;
-        if (metric < 0.0 || metric >= EmitterD)
-            continue;
-        double depth = nShiftScale * (metric * ZPD / (EmitterD - metric) + ZPD);
-        if (depth < minCutoff || depth >= maxCutoff)
-            continue;
-        // Quantization: d(depth)/d(shift) = depth^2 * dShiftStep / (ZPD*EmitterD)
-        double quantMm = depth * depth * dShiftStep / (ZPD * EmitterD);
-        if (quantMm > maxQuantizationMm)
-            continue;
-        m_s2dTable[s] = static_cast<uint16_t>(depth);
+        double fixedRefX = (double)(s - nConstShiftEff) / ParamCoeff - 0.375;
+        double metric    = fixedRefX * planePixelSize;
+        if (DCL - metric <= 0) { m_s2dTable[s] = 0; continue; }   // disparity → ∞
+        // ShiftScale produces 0.1mm units like official. Divide by 10 so our
+        // DEPTH_1_MM stream stays in mm.
+        double depth_01mm = ShiftScale * (metric * ZPD / (DCL - metric) + ZPD);
+        double depth_mm   = depth_01mm / 10.0;
+        if (depth_mm <= MIN_DEPTH || depth_mm >= MAX_DEPTH) { m_s2dTable[s] = 0; continue; }
+        m_s2dTable[s] = (uint16_t)depth_mm;
+        validCount++;
+        if (s < minShiftValid) minShiftValid = s;
+        if (s > maxShiftValid) maxShiftValid = s;
     }
+
+    fprintf(stderr,
+        "AstraDevice: S2D table (PrimeSense, ZPD=%.1f ZPPS=%.6f DCL=%.1f "
+        "CS_eff=%.1f PPS_eff=%.6f): %d valid entries, shift [%d, %d]\n",
+        ZPD, ZPPS, DCL, nConstShiftEff, planePixelSize,
+        validCount, minShiftValid, maxShiftValid);
 }
 
 bool AstraDevice::readCameraParams()
@@ -541,7 +555,9 @@ bool AstraDevice::configureDepthStream(int width, int height, int fps)
         fprintf(stderr, "AstraDevice: ASTRA_DEPTH_FORMAT=%s -> fw=%d dec=%d\n",
                 fmtEnv, fwFmt, decFmt);
     }
-    m_fwCmd->setDepthFormat(static_cast<uint16_t>(fwFmt));
+    bool fmtOk = m_fwCmd->setDepthFormat(static_cast<uint16_t>(fwFmt));
+    fprintf(stderr, "AstraDevice: setDepthFormat(fw=%d) -> %s, decoder=%d\n",
+            fwFmt, fmtOk ? "OK" : "REJECTED", decFmt);
     m_depthProc->setDepthFormat(decFmt);
 
     if (!m_fwCmd->setDepthResolution(fwRes)) {
@@ -614,16 +630,6 @@ bool AstraDevice::startDepthBulkRead()
                                       const uint8_t* data,
                                       uint32_t dataOffset,
                                       uint32_t dataSize) {
-        static int cbDiag = 0;
-        if (cbDiag < 5) {
-            cbDiag++;
-            FILE* f = fopen("/tmp/depth_cb.log", "a");
-            if (f) {
-                fprintf(f, "depth_cb[%d]: type=0x%04x pktId=%u size=%u\n",
-                        cbDiag, header.type, header.packetID, dataSize);
-                fclose(f);
-            }
-        }
         m_depthProc->processPacket(header, data, dataOffset, dataSize);
     });
 
