@@ -49,6 +49,7 @@ add_library(oni_driver_astra SHARED
     src/IrProcessor.cpp
     src/DepthProcessor.cpp
     src/FirmwareCmd.cpp
+    src/SoftFilter.cpp
 )
 
 target_include_directories(oni_driver_astra
@@ -229,5 +230,45 @@ if(BUILD_EXAMPLES)
     set_target_properties(ir_control PROPERTIES
         INSTALL_RPATH "${OPENNI2_RPATH}"
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+    )
+
+    # Automated depth comparison tool (capture + compare)
+    add_executable(dump_compare examples/dump_compare.c)
+    set_source_files_properties(examples/dump_compare.c PROPERTIES LANGUAGE CXX)
+    target_include_directories(dump_compare PRIVATE ${OPENNI2_PUBLIC_INCLUDE})
+    target_link_directories(dump_compare PRIVATE ${OPENNI2_LIB_DIR})
+    target_link_libraries(dump_compare PRIVATE OpenNI2 pthread m)
+    set_target_properties(dump_compare PROPERTIES
+        INSTALL_RPATH "${OPENNI2_RPATH}"
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+    )
+
+    # Frame dump tool (calibration capture)
+    add_executable(dump_frame examples/dump_frame.c)
+    set_source_files_properties(examples/dump_frame.c PROPERTIES LANGUAGE CXX)
+    target_include_directories(dump_frame PRIVATE ${OPENNI2_PUBLIC_INCLUDE})
+    target_link_directories(dump_frame PRIVATE ${OPENNI2_LIB_DIR})
+    target_link_libraries(dump_frame PRIVATE OpenNI2 pthread)
+    set_target_properties(dump_frame PROPERTIES
+        INSTALL_RPATH "${OPENNI2_RPATH}"
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+    )
+
+    # S2D calibration tool — pure math mode (no hardware)
+    add_executable(s2d_calibrate tools/s2d_calibrate.cpp)
+    target_link_libraries(s2d_calibrate PRIVATE m)
+    set_target_properties(s2d_calibrate PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tools
+    )
+
+    # S2D calibration tool — capture mode (requires hardware + OpenNI2)
+    add_executable(s2d_calibrate_capture tools/s2d_calibrate.cpp)
+    target_include_directories(s2d_calibrate_capture PRIVATE ${OPENNI2_PUBLIC_INCLUDE})
+    target_link_directories(s2d_calibrate_capture PRIVATE ${OPENNI2_LIB_DIR})
+    target_link_libraries(s2d_calibrate_capture PRIVATE OpenNI2 m pthread)
+    target_compile_definitions(s2d_calibrate_capture PRIVATE CAPTURE_MODE)
+    set_target_properties(s2d_calibrate_capture PROPERTIES
+        INSTALL_RPATH "${OPENNI2_RPATH}"
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tools
     )
 endif()
