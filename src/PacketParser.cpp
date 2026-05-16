@@ -214,8 +214,8 @@ void PacketParser::dispatchPacket()
     diagPackets_++;
     diagBytesDispatched_ += dataReceived_;
 
-    if (diagPackets_ <= 200) {
-        // Only log SOF/EOF packets (types ending in 0x00 with high byte 0x71/0x75/0x81/0x85)
+    if (diagPackets_ <= 3) {
+        // Only log SOF/EOF packets for first 3 frames
         uint16_t t = currentHeader_.type;
         if (t == PacketType::DEPTH_SOF || t == PacketType::DEPTH_EOF ||
             t == PacketType::IMAGE_SOF || t == PacketType::IMAGE_EOF) {

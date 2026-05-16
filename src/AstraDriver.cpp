@@ -9,6 +9,7 @@ static constexpr uint16_t ASTRA_VID = 0x2bc5;
 AstraDriver::AstraDriver(OniDriverServices* pDriverServices)
     : DriverBase(pDriverServices)
 {
+    fprintf(stderr, "=== AstraDriver (custom) BUILD: 2026-05-16d S2D: fB=342857 C=1066.26 maxD=1000 noSF ===\n");
 }
 
 AstraDriver::~AstraDriver()

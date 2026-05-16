@@ -409,11 +409,6 @@ void UsbDevice::bulkReadLoop(int endpoint)
             state.callback(buf, transferred);
             totalReads++;
             totalBytes += transferred;
-            bulkDiagCount++;
-            if (bulkDiagCount <= 5) {
-                fprintf(stderr, "DIAG bulk ep=0x%02x read[%d]: %d bytes (total=%zu)\n",
-                        endpoint, bulkDiagCount, transferred, totalBytes);
-            }
         } else if (rc == LIBUSB_ERROR_TIMEOUT) {
             if (transferred > 0) {
                 state.callback(buf, transferred);
@@ -432,8 +427,7 @@ void UsbDevice::bulkReadLoop(int endpoint)
             }
         }
     }
-    fprintf(stderr, "DIAG bulk ep=0x%02x done: totalReads=%d totalBytes=%zu errors=%d\n",
-            endpoint, totalReads, totalBytes, errorCount);
+    // Bulk loop done (quiet — remove DIAG spam for production)
     delete[] buf;
 }
 
