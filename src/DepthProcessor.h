@@ -13,6 +13,8 @@
 //
 // All decoded shift values pass through a ShiftToDepth LUT before
 // being written to the output buffer as uint16 depth values (mm).
+//
+// Post-processing: SoftFilter speckle removal (optional, enabled by default)
 
 class DepthProcessor : public FrameProcessor {
 public:
@@ -29,6 +31,9 @@ public:
 
     // Set firmware version for SOF padding logic (e.g. 0x0501 for v5.1)
     void setFirmwareVersion(uint16_t version);
+
+    // Enable/disable SoftFilter speckle removal (default: true)
+    void setSoftFilterEnabled(bool enabled);
 
 protected:
     void processFramePacketChunk(const PacketHeader& header,
@@ -64,6 +69,7 @@ private:
     static const int PACKED11_OUTPUT_SIZE = 8;    // 8 pixels per element
     std::vector<uint8_t> packed11Buffer_;
     int packed11BufferSize_ = 0;
+    bool packed11FrameSkipped_ = false;
 
     // PSCompressed: accumulate all frame data, decode at EOF.
     // Simpler and more robust than PrimeSense's cross-chunk self-synchronization
@@ -92,4 +98,21 @@ private:
 
     // No-depth sentinel value
     static const uint16_t NO_DEPTH_VALUE = 0;
+
+    // SoftFilter speckle removal
+    bool softFilterEnabled_ = false;
+
+    // --- First-frame diagnostics ---
+    bool shiftDiagDone_ = false;
+    struct ShiftAccum {
+        uint32_t count = 0, validCount = 0;
+        uint16_t minShift = 0xFFFF, maxShift = 0;
+        int hist[16] = {};  // 128-wide buckets: [0-127],[128-255],...,[1920-2047]
+    };
+    ShiftAccum shiftAccum_;
+
+    // --- Per-frame packet accounting ---
+    int frameDiagCount_ = 0;
+    int frameDiagPacketCount_ = 0;
+    int frameDiagDataBytes_ = 0;
 };
