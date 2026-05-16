@@ -100,7 +100,7 @@ private:
     static const uint16_t NO_DEPTH_VALUE = 0;
 
     // SoftFilter speckle removal
-    bool softFilterEnabled_ = false;
+    bool softFilterEnabled_ = true;
 
     // --- First-frame diagnostics ---
     bool shiftDiagDone_ = false;
