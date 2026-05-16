@@ -89,6 +89,19 @@ private:
     // Shift-to-depth LUT
     std::vector<uint16_t> m_s2dTable;
 
+    // S2D configuration (from firmware or hardcoded defaults)
+    struct S2DConfig {
+        int    ParamCoeff      = 4;
+        int    ConstShift      = 200;
+        int    ShiftScale      = 10;
+        double ZPD             = 130.0;
+        double ZPPS            = 0.113967;
+        double DCL             = 7.5;
+        double DCRCDIS         = 2.63;
+        int    pixelSizeFactor = 1;
+    };
+    S2DConfig m_s2dConfig;
+
     // Device state
     std::string m_serialNumber;
     uint32_t m_fwVersion = 0;

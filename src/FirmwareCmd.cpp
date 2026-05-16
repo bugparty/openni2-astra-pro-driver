@@ -701,7 +701,6 @@ bool FirmwareCmd::getFixedParams(uint8_t* recvData, int* recvSize)
     int totalRead = 0;
 
     while (totalRead < TOTAL_BYTES) {
-        // Request payload: uint16 word-offset into the FixedParams struct
         uint16_t wordOffset = static_cast<uint16_t>(totalRead / sizeof(uint32_t));
         uint8_t payload[2];
         payload[0] = static_cast<uint8_t>(wordOffset & 0xFF);
@@ -711,7 +710,7 @@ bool FirmwareCmd::getFixedParams(uint8_t* recvData, int* recvSize)
         int respSize = 0;
 
         if (!sendRecv(cmdId, payload, sizeof(payload), resp, &respSize)) {
-            fprintf(stderr, "FirmwareCmd: getFixedParams chunk at offset %d failed\n", totalRead);
+            fprintf(stderr, "getFixedParams: sendRecv failed at offset %d (respSize=%d)\n", totalRead, respSize);
             break;
         }
 

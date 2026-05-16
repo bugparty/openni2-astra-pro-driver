@@ -6,7 +6,7 @@
 #include <algorithm>
 
 static constexpr uint16_t ASTRA_VID = 0x2bc5;
-static constexpr uint16_t ASTRA_PID = 0x0403;
+static constexpr uint16_t ASTRA_PID = 0x0403;  // PrimeSense depth interface (Astra Pro has dual PID: 0501=UVC, 0403=depth)
 static constexpr int CTRL_TIMEOUT_MS = 5000;
 static constexpr int BULK_TIMEOUT_MS = 1000;
 static constexpr int BULK_BUF_SIZE = 64 * 1024;  // 64KB bulk read buffer

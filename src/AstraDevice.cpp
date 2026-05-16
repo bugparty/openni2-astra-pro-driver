@@ -438,25 +438,23 @@ void AstraDevice::buildSensorInfos()
 
 void AstraDevice::computeShiftToDepthTable()
 {
-    // PrimeSense ShiftToDepth formula, constants from gdb on official liborbbec.so
-    // (Astra Pro fw 0xe752):
-    //   ParamCoeff=4, ConstShift=200, ShiftScale=10, pixelSizeFactor=1
-    //   ZPD=130.0mm, ZPPS=0.113967mm, DCL=7.5mm
+    // PrimeSense ShiftToDepth formula.
+    // Constants come from readCameraParams() which reads them from firmware
+    // (GetFixedParams + AlgorithmParams). Falls back to hardcoded defaults
+    // if firmware reads fail.
     // With ShiftScale=10, the formula output is already in mm (DEPTH_1_MM).
     // Reference: openni-sensor-primesense/Source/XnDDK/XnShiftToDepth.cpp:48-103
 
     const int maxShift = 2048;
     m_s2dTable.resize(maxShift, 0);
 
-    // Device constants captured from liborbbec.so XnShiftToDepthConfig at runtime
-    // via gdb (Astra Pro fw 0xe752).
-    const int    ParamCoeff      = 4;
-    const int    ConstShift      = 200;
-    const int    ShiftScale      = 10;        // formula multiplier; produces mm directly
-    const double ZPD             = 130.0;     // mm
-    const double ZPPS            = 0.113967;  // mm
-    const double DCL             = 7.5;       // mm (LDDIS)
-    const int    pixelSizeFactor = 1;         // official uses 1 even for VGA
+    const int    ParamCoeff      = m_s2dConfig.ParamCoeff;
+    const int    ConstShift      = m_s2dConfig.ConstShift;
+    const int    ShiftScale      = m_s2dConfig.ShiftScale;
+    const double ZPD             = m_s2dConfig.ZPD;
+    const double ZPPS            = m_s2dConfig.ZPPS;
+    const double DCL             = m_s2dConfig.DCL;
+    const int    pixelSizeFactor = m_s2dConfig.pixelSizeFactor;
 
     // nDeviceMaxDepthValue from official = 10000. Use as upper cutoff so
     // high-shift outliers (shift > ~700 → depth > ~1m) that produce
@@ -492,18 +490,64 @@ void AstraDevice::computeShiftToDepthTable()
 
 bool AstraDevice::readCameraParams()
 {
-    // Calibration source on Astra Pro fw 0xe752: NOT plain flash.
-    //   - flash @ 0x70000 (official driver's primary target) returns all 0xFF
-    //   - flash @ 0x10000 is firmware code, not params
-    //   - ALG_DEPTH_INFO returns 2 bytes (count/flag)
-    // The official driver (XnSensor::GetCameraParam @ 0x457e0) takes a
-    // chip-ID-dependent branch: if chip_id == 0x06, it uses
-    // XnHostProtocolI2CReadFlash (a separate I2C-bus protocol) instead of
-    // the direct flash read. Implementing that path would unlock proper
-    // forcalllength/baseline/fittingCoeff/nShiftScale, eliminating the ~1.5 %
-    // S2D bias relative to the official driver. Until then we rely on the
-    // hardcoded PrimeSense-fit constants in computeShiftToDepthTable.
-    // See docs/official-driver-s2d-formula.md.
+    // Read S2D calibration from firmware via GetFixedParams (cmdId 0x0004)
+    // and AlgorithmParams (cmdId 0x0016, type=DEPTH_INFO).
+    // On failure, keep hardcoded defaults from m_s2dConfig.
+
+    // 1. GetFixedParams — XnFixedParams struct layout (from PrimeSense source
+    //    XnDeviceSensor.h:341, verified by gdb capture on Astra Pro FW 5.8.22):
+    //      offset 92:  float fDCmosEmitterDistance  (DCL)
+    //      offset 96:  float fDCmosRCmosDistance     (DCRCDIS)
+    //      offset 100: float fReferenceDistance       (ZPD)
+    //      offset 104: float fReferencePixelSize     (ZPPS)
+    {
+        uint8_t buf[256];
+        int size = sizeof(buf);
+        if (m_fwCmd->getFixedParams(buf, &size) && size >= 108) {
+            float dcl, dcrcdis, zpd, zpps;
+            memcpy(&dcl,     buf + 92,  4);
+            memcpy(&dcrcdis, buf + 96,  4);
+            memcpy(&zpd,     buf + 100, 4);
+            memcpy(&zpps,    buf + 104, 4);
+
+            if (std::isfinite(dcl) && dcl > 0)  m_s2dConfig.DCL     = dcl;
+            if (std::isfinite(dcrcdis) && dcrcdis > 0) m_s2dConfig.DCRCDIS = dcrcdis;
+            if (std::isfinite(zpd) && zpd > 0)  m_s2dConfig.ZPD     = zpd;
+            if (std::isfinite(zpps) && zpps > 0) m_s2dConfig.ZPPS    = zpps;
+
+            fprintf(stderr,
+                "readCameraParams: GetFixedParams OK (%d bytes) → "
+                "DCL=%.6f DCRCDIS=%.6f ZPD=%.6f ZPPS=%.6f\n",
+                size, dcl, dcrcdis, zpd, zpps);
+        } else {
+            fprintf(stderr,
+                "readCameraParams: GetFixedParams failed, using defaults "
+                "(DCL=%.1f ZPD=%.1f ZPPS=%.6f)\n",
+                m_s2dConfig.DCL, m_s2dConfig.ZPD, m_s2dConfig.ZPPS);
+        }
+    }
+
+    // 2. AlgorithmParams DEPTH_INFO → nConstShift (uint16)
+    {
+        uint8_t buf[16];
+        int size = sizeof(buf);
+        if (m_fwCmd->algorithmParams(FirmwareCmd::ALG_DEPTH_INFO, 1, 30, buf, &size)
+            && size >= 2) {
+            uint16_t constShift;
+            memcpy(&constShift, buf, 2);
+            if (constShift > 0 && constShift < 4096) {
+                m_s2dConfig.ConstShift = constShift;
+            }
+            fprintf(stderr,
+                "readCameraParams: AlgorithmParams DEPTH_INFO → ConstShift=%d\n",
+                constShift);
+        } else {
+            fprintf(stderr,
+                "readCameraParams: AlgorithmParams DEPTH_INFO failed, "
+                "using default ConstShift=%d\n", m_s2dConfig.ConstShift);
+        }
+    }
+
     return true;
 }
 
