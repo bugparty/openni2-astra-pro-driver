@@ -364,6 +364,10 @@ bool FirmwareCmd::setLaser(bool enabled)
 {
     // SendCmd 0x0055: Laser Enable
     // Data: 1 byte, 0=off, 1=on
+    // Proven method: works on Astra Pro (8.6% valid pixels with laser on).
+    // Official driver uses SendCmd(0x0015, 42) but that goes through a different
+    // code path (XnHostProtocol SendCmd wrapper) that we don't replicate yet.
+    // TODO: Implement proper SendCmd wrapper for 0x0015 method.
     uint8_t data = enabled ? 1 : 0;
     if (!sendRecv(SC_LASER_ENABLE, &data, 1, nullptr, nullptr)) {
         fprintf(stderr, "FirmwareCmd::setLaser: SendCmd 0x0055 failed\n");

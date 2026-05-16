@@ -147,6 +147,20 @@ public:
     // data: output buffer, dataSize: set to actual bytes read.
     bool readFlash(uint32_t addr, uint16_t size, uint8_t* data, int* dataSize);
 
+    // Read I2C flash data (XnHostProtocol XN_READ_I2C, cmdId 0x000B).
+    // Used by official driver on chip_id=0x06 devices to read calibration
+    // parameters at addr 0x70000. Reads in 32-byte chunks, reassembled internally.
+    // Returns true on success. dataSize is set to actual bytes read.
+    bool readI2CFlash(uint32_t addr, uint16_t size, uint8_t* data, int* dataSize);
+
+    // Convenience: send a raw cmdId and get the response data.
+    // Returns true if error code == 0. Exposed for sending ad-hoc Orbbec
+    // custom commands not in our PrimeSense opcode helpers.
+    bool sendRecv(uint16_t cmdId,
+                  const uint8_t* sendData, int sendSize,
+                  uint8_t* recvData, int* recvDataSize,
+                  int timeoutMs = 5000);
+
 private:
     // Low-level XnHostProtocol send/receive.
     // sendCommand: build header, send via controlWrite.
@@ -156,13 +170,6 @@ private:
     // receiveResponse: read response via controlRead, validate magic and error.
     // Returns response data length (bytes after 10-byte header), or negative on error.
     int receiveResponse(uint8_t* buf, int bufSize, int timeoutMs = 5000);
-
-    // Convenience: send a command and get the response data.
-    // Returns true if error code == 0.
-    bool sendRecv(uint16_t cmdId,
-                  const uint8_t* sendData, int sendSize,
-                  uint8_t* recvData, int* recvDataSize,
-                  int timeoutMs = 5000);
 
     UsbDevice* m_usbDev;
     uint32_t fwVersion_ = 0;
@@ -232,6 +239,7 @@ private:
         SP_DEPTH_RESOLUTION = 19,  // PARAM_DEPTH_RESOLUTION
         SP_IR_FPS           = 27,  // PARAM_IR_FPS
         SP_DEPTH_FPS        = 20,  // PARAM_DEPTH_FPS
+        SP_LASER_ON_OFF     = 0x50, // PARAM_LASER_ONOFF (emitter enable)
     };
 
     // Send magic (host -> device)
