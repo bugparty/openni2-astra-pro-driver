@@ -243,6 +243,26 @@ bool FirmwareCmd::init()
         }
     }
 
+    // 1b. Get USB core type (cmdId 0x0028) — official driver sends this
+    // right after GetVersion, before GetSerial. Response is a uint16
+    // core type value (e.g., 2 for this device).
+    uint16_t usbCoreType = 0;
+    {
+        uint16_t cmdUsbCore = cmdTable_[22];  // index 22 = GetUsbCoreType
+        if (cmdUsbCore != 0xFFFF) {
+            uint8_t ucResp[16];
+            int ucRespSize = 0;
+            if (sendRecv(cmdUsbCore, nullptr, 0, ucResp, &ucRespSize)) {
+                if (ucRespSize >= 2) {
+                    usbCoreType = static_cast<uint16_t>(ucResp[0] | (ucResp[1] << 8));
+                }
+                fprintf(stderr, "FirmwareCmd: GetUsbCoreType OK, coreType=%u\n", usbCoreType);
+            } else {
+                fprintf(stderr, "FirmwareCmd: GetUsbCoreType failed (non-fatal)\n");
+            }
+        }
+    }
+
     // 2. Read serial number via vendor extension cmd 0x0025
     respSize = 0;
     if (sendRecv(VC_GET_SERIAL, nullptr, 0, respData, &respSize)) {
@@ -274,6 +294,37 @@ bool FirmwareCmd::init()
         // Don't fail completely — some operations may still work
     }
 
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// XnHostProtocol: getUsbCoreType
+// ---------------------------------------------------------------------------
+
+bool FirmwareCmd::getUsbCoreType(uint16_t& coreType)
+{
+    // XnHostProtocol index 22 = GetUsbCoreType (cmdId 0x0028)
+    uint16_t cmdId = cmdTable_[22];
+    if (cmdId == 0xFFFF) {
+        fprintf(stderr, "FirmwareCmd::getUsbCoreType: not supported by firmware\n");
+        return false;
+    }
+
+    // Empty-payload query: send header only, get back a 2-byte uint16
+    uint8_t respData[16];
+    int respSize = 0;
+    if (!sendRecv(cmdId, nullptr, 0, respData, &respSize)) {
+        fprintf(stderr, "FirmwareCmd::getUsbCoreType: cmdId 0x%04x failed\n", cmdId);
+        return false;
+    }
+
+    if (respSize < 2) {
+        fprintf(stderr, "FirmwareCmd::getUsbCoreType: response too short (%d bytes)\n", respSize);
+        return false;
+    }
+
+    coreType = static_cast<uint16_t>(respData[0] | (respData[1] << 8));
+    fprintf(stderr, "FirmwareCmd::getUsbCoreType: coreType=%u\n", coreType);
     return true;
 }
 

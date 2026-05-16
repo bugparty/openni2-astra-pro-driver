@@ -132,6 +132,14 @@ public:
         ALG_FREQUENCY    = 0x80,
     };
 
+    // --- USB core type ---
+
+    // Query USB core type via XnHostProtocol cmdId 0x0028.
+    // Returns true on success, coreType set to the uint16 response value.
+    // Official driver calls this right after GetVersion during init.
+    // The coreType value feeds into InitFWParams to select correct parameter set.
+    bool getUsbCoreType(uint16_t& coreType);
+
     // --- Fixed params (camera calibration) ---
 
     // Read camera calibration params via XnHostProtocol GetFixedParams (cmd 4).

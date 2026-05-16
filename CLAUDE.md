@@ -47,7 +47,7 @@ For direct USB control, see `../ASTRA_PRO_PROTOCOL.md` — a reverse-engineered 
 On Astra Pro fw 0xe752, **depth format must be Packed11**: in `AstraDevice::configureDepthStream` set `m_fwCmd->setDepthFormat(3)` and `m_depthProc->setDepthFormat(1)`. PSCompressed (firmware fmt 1) yields garbage — nibble stream collapses to ~LUT[1] (~322mm) for ~3% of pixels.
 
 ### S2D LUT
-Uses PrimeSense triangulation formula with hardcoded constants (nParamCoeff=4, nConstShift=-1171.4247, ZPD=100, ZPPS=0.03, EmitterD=51, pixelSizeFactor=2 for VGA). Result is within ~1.7% of the official driver; a flash-param read would close the gap.
+Uses PrimeSense triangulation formula with gdb-captured constants (nParamCoeff=4, nConstShift=200, ShiftScale=10, ZPD=130.0, ZPPS=0.113967, DCL=7.5, pixelSizeFactor=1). ShiftScale=10 produces mm directly — do NOT divide by 10. Mean depth within 0.7% of official driver. 0.4% edge-noise pixels produce depths > 1m where official outputs 0 (edge filtering not yet implemented).
 
 ### Driver Loading
 OpenNI2 scans `<libOpenNI2.so dir>/OpenNI2/Drivers/*.so` and loads ALL files exporting `oniDriverCreate`. Keep exactly one driver `.so` in that dir or you get duplicate device entries.

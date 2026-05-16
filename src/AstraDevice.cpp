@@ -386,6 +386,23 @@ bool AstraDevice::initFirmware()
     m_fwVersion = m_fwCmd->firmwareVersion();
     m_serialNumber = m_fwCmd->serialNumber();
 
+    // Apply InitFWParams-style defaults from official driver.
+    // These are the SetParam calls that InitFWParams sends after GetUsbCoreType
+    // in XnDeviceSensorConfigureVersion. They configure the firmware's depth
+    // processing pipeline.
+    //
+    // Without these, the firmware may use different default parameters that
+    // produce incorrect depth data (shifts in wrong range, etc.).
+    //
+    // Captured via gdb on official liborbbec.so:
+    //   PARAM_DEPTH_FORMAT=3 (Packed11), PARAM_DEPTH_RESOLUTION=1 (VGA),
+    //   PARAM_DEPTH_FPS=30, PARAM_DEPTH_GAIN=1,
+    //   PARAM_DEPTH_CONST_SHIFT=42, PARAM_DEPTH_SHIFT_SCALE=0,
+    //   PARAM_DEPTH_SHIFT_SKIP=1, PARAM_DEPTH_REGISTRATION=1
+    m_fwCmd->setParam(21, 42);   // PARAM_DEPTH_CONST_SHIFT
+    m_fwCmd->setParam(24, 0);    // PARAM_DEPTH_SHIFT_SCALE
+    m_fwCmd->setParam(23, 1);    // PARAM_DEPTH_SHIFT_SKIP
+
     return true;
 }
 
@@ -421,50 +438,31 @@ void AstraDevice::buildSensorInfos()
 
 void AstraDevice::computeShiftToDepthTable()
 {
-    // PrimeSense ShiftToDepth formula, constants harvested from the official
-    // liborbbec.so log output on this device (Astra Pro fw 0xe752):
-    //
-    //   ParamCoeff = 4, ConstShift = 200, ShiftScale = 10 (but =1 for DEPTH_1_MM)
-    //   ZPD  = 130.0    (Depth.ZPD,  zero-plane distance, mm)
-    //   ZPPS = 0.113967 (Depth.ZPPS, zero-plane pixel size, mm)
-    //   LDDIS (DCL) = 7.5  (Depth.LDDIS, emitter-DCmos baseline, mm)
-    //
+    // PrimeSense ShiftToDepth formula, constants from gdb on official liborbbec.so
+    // (Astra Pro fw 0xe752):
+    //   ParamCoeff=4, ConstShift=200, ShiftScale=10, pixelSizeFactor=1
+    //   ZPD=130.0mm, ZPPS=0.113967mm, DCL=7.5mm
+    // With ShiftScale=10, the formula output is already in mm (DEPTH_1_MM).
     // Reference: openni-sensor-primesense/Source/XnDDK/XnShiftToDepth.cpp:48-103
-    // The official driver on chip_id==6 reaches the "Sensor params invalid
-    // (NaN value)" branch (flash 0x70000 is all-0xFF) and falls back to this
-    // PrimeSense formula — NOT the stereo `focalBL/(C-s)` formula we used to
-    // hand-fit. The formula has a NARROW valid shift window (e.g. [400, 533]
-    // at VGA); shifts outside it correctly map to 0 (NO_DEPTH), which is why
-    // the official driver shows the scene's true max depth instead of
-    // assigning bogus values to every pixel.
-    //
-    // DIAGNOSTIC (2026-05-15): Raw shift data spans [1, ~2032].
-    // The old PrimeSense formula with ConstShift=800 only covers [1602,1711].
-    // This is because dMetric < DCL=7.5 constrains shift to < 1710.
-    //
-    // The official formula uses disparity = (fittingCoeff - s) / nShiftScale,
-    // where fittingCoeff is slightly above max shift. Depth = focalBL/disparity.
-    //
-    // Calibrated to match: at shift=512, depth~1300mm; at shift=2047, depth~300mm
-    // Reference: docs/official-driver-s2d-formula.md
 
     const int maxShift = 2048;
     m_s2dTable.resize(maxShift, 0);
 
     // Device constants captured from liborbbec.so XnShiftToDepthConfig at runtime
-    // via gdb (Astra Pro fw 0xe752). pixelSizeFactor=1 was THE bug — VGA does
-    // not use factor=2 on this device. Output ShiftScale=10 means LUT outputs
-    // in 0.1mm units; we divide by 10 to keep DEPTH_1_MM semantics.
+    // via gdb (Astra Pro fw 0xe752).
     const int    ParamCoeff      = 4;
     const int    ConstShift      = 200;
-    const int    ShiftScale      = 10;        // matches official; we /10 below
+    const int    ShiftScale      = 10;        // formula multiplier; produces mm directly
     const double ZPD             = 130.0;     // mm
     const double ZPPS            = 0.113967;  // mm
     const double DCL             = 7.5;       // mm (LDDIS)
     const int    pixelSizeFactor = 1;         // official uses 1 even for VGA
 
+    // nDeviceMaxDepthValue from official = 10000. Use as upper cutoff so
+    // high-shift outliers (shift > ~700 → depth > ~1m) that produce
+    // unrealistic depths don't pollute the output.
     const uint16_t MIN_DEPTH = 0;         // mm — official sets MinCutOff=0
-    const uint16_t MAX_DEPTH = 65534;     // mm — official sets MaxCutOff=65534
+    const uint16_t MAX_DEPTH = 10000;     // mm — nDeviceMaxDepthValue
 
     // PrimeSense formula transforms
     const double nConstShiftEff = (double)(ParamCoeff * ConstShift) / pixelSizeFactor;
@@ -475,10 +473,9 @@ void AstraDevice::computeShiftToDepthTable()
         double fixedRefX = (double)(s - nConstShiftEff) / ParamCoeff - 0.375;
         double metric    = fixedRefX * planePixelSize;
         if (DCL - metric <= 0) { m_s2dTable[s] = 0; continue; }   // disparity → ∞
-        // ShiftScale produces 0.1mm units like official. Divide by 10 so our
-        // DEPTH_1_MM stream stays in mm.
-        double depth_01mm = ShiftScale * (metric * ZPD / (DCL - metric) + ZPD);
-        double depth_mm   = depth_01mm / 10.0;
+        // ShiftScale=10 produces values already in mm for DEPTH_1_MM semantics.
+        // Previously we incorrectly divided by 10, making all depths 10x too small.
+        double depth_mm = ShiftScale * (metric * ZPD / (DCL - metric) + ZPD);
         if (depth_mm <= MIN_DEPTH || depth_mm >= MAX_DEPTH) { m_s2dTable[s] = 0; continue; }
         m_s2dTable[s] = (uint16_t)depth_mm;
         validCount++;
