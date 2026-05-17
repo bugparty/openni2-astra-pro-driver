@@ -66,6 +66,14 @@ void DepthProcessor::setSoftFilterEnabled(bool enabled)
     softFilterEnabled_ = enabled;
 }
 
+void DepthProcessor::postProcessFrame(uint8_t* data, int size)
+{
+    if (!softFilterEnabled_) return;
+    int pixels = size / 2;
+    if (pixels != width() * height()) return;
+    SoftFilter::apply(reinterpret_cast<uint16_t*>(data), width(), height(), NO_DEPTH_VALUE);
+}
+
 // ---------------------------------------------------------------------------
 // ShiftToDepth conversion
 // ---------------------------------------------------------------------------
@@ -120,18 +128,6 @@ void DepthProcessor::padPixels(uint32_t count)
 
 void DepthProcessor::onStartOfFrame(const PacketHeader& header)
 {
-    // Per-frame packet accounting diagnostics (first 3 frames only)
-    if (frameDiagCount_ < 3 && frameDiagPacketCount_ > 0) {
-        fprintf(stderr, "DIAG frame#%d: sofPktId=%u ts=%u, prevFrame had %d pkts %d dataBytes "
-                "→ bytesWritten=%d expected=%d corrupted=%d\n",
-                frameDiagCount_, header.packetID, header.timestamp,
-                frameDiagPacketCount_, frameDiagDataBytes_,
-                bytesWritten_, calculateExpectedSize(), frameCorrupted_ ? 1 : 0);
-        frameDiagCount_++;
-    }
-    frameDiagPacketCount_ = 0;
-    frameDiagDataBytes_ = 0;
-
     FrameProcessor::onStartOfFrame(header);
 
     packed11BufferSize_ = 0;
@@ -196,63 +192,7 @@ void DepthProcessor::onEndOfFrame(const PacketHeader& header)
         markCorrupted();
     }
 
-    // --- First-frame shift/depth diagnostics ---
-    if (!shiftDiagDone_ && bytesWritten_ > 0) {
-        shiftDiagDone_ = true;
-        uint16_t* depthData = reinterpret_cast<uint16_t*>(writeBuffer_.data());
-        int pixelCount = bytesWritten_ / 2;
-        uint32_t validDepth = 0;
-        uint16_t minD = 0xFFFF, maxD = 0;
-        for (int i = 0; i < pixelCount; i++) {
-            uint16_t d = depthData[i];
-            if (d != 0) {
-                validDepth++;
-                if (d < minD) minD = d;
-                if (d > maxD) maxD = d;
-            }
-        }
-        fprintf(stderr, "DIAG depth frame#1: pixels=%d valid=%d(%.1f%%) "
-                "depthRange=[%d,%d] format=%d corrupted=%d bytesWritten=%d expected=%d\n",
-                pixelCount, validDepth, 100.0 * validDepth / pixelCount,
-                (minD == 0xFFFF) ? 0 : minD, maxD,
-                depthFormat_, frameCorrupted_ ? 1 : 0,
-                bytesWritten_, expectedSize);
-        if (pixelCount > 0) {
-            fprintf(stderr, "DIAG depth samples [0-9]:");
-            for (int i = 0; i < 10 && i < pixelCount; i++) {
-                fprintf(stderr, " %d", depthData[i]);
-            }
-            fprintf(stderr, "\n");
-            int mid = pixelCount / 2;
-            fprintf(stderr, "DIAG depth samples [%d-%d]:", mid, mid + 9);
-            for (int i = mid; i < mid + 10 && i < pixelCount; i++) {
-                fprintf(stderr, " %d", depthData[i]);
-            }
-            fprintf(stderr, "\n");
-        }
-        // Dump raw shift statistics (from Packed11 pre-S2D)
-        if (shiftAccum_.count > 0) {
-            fprintf(stderr, "DIAG raw shifts: total=%u valid=%u(%.1f%%) range=[%d,%d]\n",
-                    shiftAccum_.count, shiftAccum_.validCount,
-                    100.0 * shiftAccum_.validCount / shiftAccum_.count,
-                    (shiftAccum_.minShift == 0xFFFF) ? 0 : shiftAccum_.minShift,
-                    shiftAccum_.maxShift);
-            fprintf(stderr, "DIAG raw shift histogram (128-wide buckets):\n");
-            for (int b = 0; b < 16; b++) {
-                int lo = b * 128, hi = lo + 127;
-                fprintf(stderr, "  [%4d-%4d]: %d (%.1f%%)\n", lo, hi,
-                        shiftAccum_.hist[b],
-                        shiftAccum_.validCount > 0 ?
-                        100.0 * shiftAccum_.hist[b] / shiftAccum_.validCount : 0.0);
-            }
-        }
-    }
-
-    // Apply SoftFilter speckle removal if enabled
-    if (softFilterEnabled_ && !frameCorrupted_) {
-        uint16_t* depthData = reinterpret_cast<uint16_t*>(writeBuffer_.data());
-        SoftFilter::apply(depthData, width(), height(), NO_DEPTH_VALUE);
-    }
+    // SoftFilter deferred to consumer thread — don't run on USB callback thread
 
     packed11BufferSize_ = 0;
     packed11FrameSkipped_ = false;
@@ -270,10 +210,6 @@ void DepthProcessor::processFramePacketChunk(const PacketHeader& header,
                                               uint32_t dataSize)
 {
     if (dataSize == 0) return;
-
-    // Per-frame packet accounting
-    frameDiagPacketCount_++;
-    frameDiagDataBytes_ += dataSize;
 
     bool isLastChunk = (header.type == PacketType::DEPTH_EOF) &&
         ((dataOffset + dataSize) >= (header.bufSize - sizeof(PacketHeader)));
@@ -387,30 +323,6 @@ void DepthProcessor::unpack11to16(const uint8_t* input, int inputSize)
 
     uint16_t* output = reinterpret_cast<uint16_t*>(writeBuffer_.data() + bytesWritten_);
 
-    // One-shot first-call dump for ground-truth comparison vs official driver.
-    static int dumpCount = 0;
-    if (dumpCount < 3 && nElements > 0) {
-        fprintf(stderr, "\n=== DUMP unpack11to16 call #%d (inputSize=%d nElements=%u) ===\n",
-                dumpCount, inputSize, nElements);
-        int dumpBytes = inputSize < 32 ? inputSize : 32;
-        fprintf(stderr, "input[0..%d]:", dumpBytes);
-        for (int i = 0; i < dumpBytes; i++) fprintf(stderr, " %02x", input[i]);
-        fprintf(stderr, "\nexpected output[0..15] (raw shifts before LUT):\n");
-        for (uint32_t e = 0; e < 2 && e < nElements; e++) {
-            const uint8_t* in = input + e * PACKED11_INPUT_SIZE;
-            uint16_t r0 = (TAKE_BITS(in[0],8,0) << 3) | TAKE_BITS(in[1],3,5);
-            uint16_t r1 = (TAKE_BITS(in[1],5,0) << 6) | TAKE_BITS(in[2],6,2);
-            uint16_t r2 = (TAKE_BITS(in[2],2,0) << 9) | (TAKE_BITS(in[3],8,0) << 1) | TAKE_BITS(in[4],1,7);
-            uint16_t r3 = (TAKE_BITS(in[4],7,0) << 4) | TAKE_BITS(in[5],4,4);
-            uint16_t r4 = (TAKE_BITS(in[5],4,0) << 7) | TAKE_BITS(in[6],7,1);
-            uint16_t r5 = (TAKE_BITS(in[6],1,0) << 10) | (TAKE_BITS(in[7],8,0) << 2) | TAKE_BITS(in[8],2,6);
-            uint16_t r6 = (TAKE_BITS(in[8],6,0) << 5) | TAKE_BITS(in[9],5,3);
-            uint16_t r7 = (TAKE_BITS(in[9],3,0) << 8) | TAKE_BITS(in[10],8,0);
-            fprintf(stderr, "  elem%u: %u %u %u %u %u %u %u %u\n", e, r0,r1,r2,r3,r4,r5,r6,r7);
-        }
-        dumpCount++;
-    }
-
     // Convert 11-bit packed data into 16-bit shorts through ShiftToDepth LUT
     // Bit layout per 11-byte group -> 8 pixels:
     //   input:  0,  1,  2,3,  4,  5,  6,7,  8,  9,10
@@ -436,21 +348,6 @@ void DepthProcessor::unpack11to16(const uint8_t* input, int inputSize)
         output[5] = applyShiftToDepth(raw5);
         output[6] = applyShiftToDepth(raw6);
         output[7] = applyShiftToDepth(raw7);
-
-        // Accumulate raw shift statistics for first frame
-        if (!shiftDiagDone_) {
-            shiftAccum_.count += 8;
-            uint16_t raws[8] = {raw0, raw1, raw2, raw3, raw4, raw5, raw6, raw7};
-            for (int k = 0; k < 8; k++) {
-                if (raws[k] != 0) {
-                    shiftAccum_.validCount++;
-                    if (raws[k] < shiftAccum_.minShift) shiftAccum_.minShift = raws[k];
-                    if (raws[k] > shiftAccum_.maxShift) shiftAccum_.maxShift = raws[k];
-                    int bucket = std::min(raws[k] >> 7, 15);  // 128-wide buckets
-                    shiftAccum_.hist[bucket]++;
-                }
-            }
-        }
 
         input += PACKED11_INPUT_SIZE;
         output += PACKED11_OUTPUT_SIZE;

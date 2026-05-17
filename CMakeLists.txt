@@ -4,6 +4,11 @@ project(oni_driver_astra LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Release optimization for production (BFS filters need -O2+)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 # Try pkg-config first, fall back to find_library, then nix store
 find_package(PkgConfig)
 if(PKG_CONFIG_FOUND)
@@ -62,6 +67,7 @@ target_include_directories(oni_driver_astra
 target_compile_definitions(oni_driver_astra
     PRIVATE
         OPENNI2_EXPORT
+        $<$<CONFIG:Debug>:ASTRA_DEBUG>
 )
 
 target_link_directories(oni_driver_astra
@@ -252,6 +258,13 @@ if(BUILD_EXAMPLES)
     set_target_properties(dump_frame PROPERTIES
         INSTALL_RPATH "${OPENNI2_RPATH}"
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+    )
+
+    # SoftFilter unit test (no hardware dependency)
+    add_executable(test_softfilter tests/test_softfilter.cpp src/SoftFilter.cpp)
+    target_include_directories(test_softfilter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    set_target_properties(test_softfilter PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
     )
 
     # S2D calibration tool — pure math mode (no hardware)

@@ -1,7 +1,7 @@
 #include "PacketParser.h"
+#include "AstraDebug.h"
 
 #include <cstring>
-#include <cstdio>
 #include <algorithm>
 
 PacketParser::PacketParser()
@@ -37,7 +37,7 @@ void PacketParser::setCallback(PacketCallback cb)
 void PacketParser::reset()
 {
     if (diagPackets_ > 0) {
-        fprintf(stderr, "DIAG parser reset: dispatched=%d invalidType=%d invalidSize=%d "
+        ASTRA_DLOG("DIAG parser reset: dispatched=%d invalidType=%d invalidSize=%d "
                 "bytesDispatched=%zu bytesFed=%zu\n",
                 diagPackets_, diagInvalidType_, diagInvalidSize_,
                 diagBytesDispatched_, diagBytesFed_);
@@ -129,7 +129,7 @@ bool PacketParser::handlePacketHeader()
     if (!validType) {
         diagInvalidType_++;
         if (diagInvalidType_ <= 10) {
-            fprintf(stderr, "DIAG parse false magic: type=0x%04x bufSize=%u pktId=%u (invalid type #%d)\n",
+            ASTRA_DLOG("DIAG parse false magic: type=0x%04x bufSize=%u pktId=%u (invalid type #%d)\n",
                     currentHeader_.type, currentHeader_.bufSize, currentHeader_.packetID, diagInvalidType_);
         }
         consumePos_ += 2;  // skip past the magic bytes only
@@ -142,7 +142,7 @@ bool PacketParser::handlePacketHeader()
     if (currentHeader_.bufSize < sizeof(PacketHeader)) {
         diagInvalidSize_++;
         if (diagInvalidSize_ <= 5) {
-            fprintf(stderr, "DIAG parse invalid bufSize=%u (< %zu) type=0x%04x, resyncing (invalid #%d)\n",
+            ASTRA_DLOG("DIAG parse invalid bufSize=%u (< %zu) type=0x%04x, resyncing (invalid #%d)\n",
                     currentHeader_.bufSize, sizeof(PacketHeader), currentHeader_.type, diagInvalidSize_);
         }
         consumePos_ += 2;  // skip past the magic bytes
@@ -156,7 +156,7 @@ bool PacketParser::handlePacketHeader()
     if (currentHeader_.bufSize > MAX_BUF_SIZE) {
         diagInvalidSize_++;
         if (diagInvalidSize_ <= 5) {
-            fprintf(stderr, "DIAG parse oversized bufSize=%u (> %u) type=0x%04x, resyncing\n",
+            ASTRA_DLOG("DIAG parse oversized bufSize=%u (> %u) type=0x%04x, resyncing\n",
                     currentHeader_.bufSize, MAX_BUF_SIZE, currentHeader_.type);
         }
         consumePos_ += 2;
@@ -213,17 +213,6 @@ void PacketParser::dispatchPacket()
 {
     diagPackets_++;
     diagBytesDispatched_ += dataReceived_;
-
-    if (diagPackets_ <= 3) {
-        // Only log SOF/EOF packets for first 3 frames
-        uint16_t t = currentHeader_.type;
-        if (t == PacketType::DEPTH_SOF || t == PacketType::DEPTH_EOF ||
-            t == PacketType::IMAGE_SOF || t == PacketType::IMAGE_EOF) {
-            fprintf(stderr, "DIAG parse pkt[%d]: type=0x%04x pktId=%u bufSize=%u dataSize=%u ts=%u\n",
-                    diagPackets_, currentHeader_.type, currentHeader_.packetID,
-                    currentHeader_.bufSize, dataReceived_, currentHeader_.timestamp);
-        }
-    }
 
     if (callback_) {
         uint32_t dataSize = dataReceived_;

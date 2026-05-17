@@ -35,8 +35,8 @@ void FrameProcessor::processPacket(const PacketHeader& header,
         }
 
         // New frame starting. If we have data from a previous incomplete frame,
-        // deliver it first (firmware may not send explicit EOF packets).
-        if (bytesWritten_ > 0 && !frameCorrupted_) {
+        // deliver it first.
+        if (bytesWritten_ > 0) {
             onEndOfFrame(header);
         }
 
@@ -44,10 +44,8 @@ void FrameProcessor::processPacket(const PacketHeader& header,
         onStartOfFrame(header);
     }
 
-    // 2. If frame not corrupted, let subclass process the data
-    if (!frameCorrupted_) {
-        processFramePacketChunk(header, data, dataOffset, dataSize);
-    }
+    // 2. Process data regardless of corruption status
+    processFramePacketChunk(header, data, dataOffset, dataSize);
 
     // 3. Explicit EOF: end frame
     if (header.type == eofType_ && (dataOffset + dataSize) >= header.bufSize - sizeof(PacketHeader)) {
@@ -62,18 +60,34 @@ bool FrameProcessor::getLatestFrame(uint8_t** data, int* size)
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(bufferMutex_);
+    uint8_t* outData;
+    int outSize;
 
-    // Swap: stable gets what was ready, ready gets what was write
-    int oldStable = stableIdx_;
-    stableIdx_ = readyIdx_;
-    readyIdx_ = writeIdx_;
-    writeIdx_ = oldStable;
+    {
+        std::lock_guard<std::mutex> lock(bufferMutex_);
 
-    // Return the stable buffer (the one we just made stable)
-    *data = buffers_[stableIdx_].data.data();
-    *size = buffers_[stableIdx_].size;
-    return buffers_[stableIdx_].size > 0;
+        // Swap: stable gets what was ready, ready gets what was write
+        int oldStable = stableIdx_;
+        stableIdx_ = readyIdx_;
+        readyIdx_ = writeIdx_;
+        writeIdx_ = oldStable;
+
+        outData = buffers_[stableIdx_].data.data();
+        outSize = buffers_[stableIdx_].size;
+    }
+    // Mutex released — postProcess runs on stable buffer without blocking USB
+
+    *data = outData;
+    *size = outSize;
+
+    // Post-process outside lock: safe because the triple-buffer needs two full USB
+    // frames (~66ms at 30fps) before this slot cycles back to writeIdx_. SoftFilter
+    // takes ~5-10ms so the race window is effectively unreachable under normal load.
+    if (outSize > 0) {
+        postProcessFrame(outData, outSize);
+    }
+
+    return outSize > 0;
 }
 
 void FrameProcessor::setResolution(int width, int height)
@@ -92,19 +106,16 @@ void FrameProcessor::onStartOfFrame(const PacketHeader& /*header*/)
 
 void FrameProcessor::onEndOfFrame(const PacketHeader& header)
 {
-    bool wasCorrupted = frameCorrupted_;
-
-    if (!wasCorrupted) {
-        // Copy write buffer into the write slot of triple buffer
+    // Deliver all frames — even "corrupted" ones contain mostly valid data.
+    // Missing pixels are zeroed by memset; SoftFilter is skipped for short frames.
+    if (bytesWritten_ > 0) {
         std::lock_guard<std::mutex> lock(bufferMutex_);
 
         FrameBuffer& wb = buffers_[writeIdx_];
         if (wb.data.size() < static_cast<size_t>(bytesWritten_)) {
             wb.data.resize(bytesWritten_);
         }
-        if (bytesWritten_ > 0) {
-            memcpy(wb.data.data(), writeBuffer_.data(), bytesWritten_);
-        }
+        memcpy(wb.data.data(), writeBuffer_.data(), bytesWritten_);
         wb.size = bytesWritten_;
         wb.timestamp = header.timestamp;
         wb.frameId = ++frameCounter_;
@@ -125,7 +136,7 @@ void FrameProcessor::onEndOfFrame(const PacketHeader& header)
         }
     }
 
-    // Reset write state for next frame (corrupted or not)
+    // Reset write state for next frame
     bytesWritten_ = 0;
     frameCorrupted_ = false;
 }

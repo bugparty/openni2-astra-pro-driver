@@ -2,8 +2,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
-#include <vector>
-#include <algorithm>
 
 SoftFilter::Config SoftFilter::getConfig(int width)
 {
@@ -22,120 +20,107 @@ SoftFilter::Config SoftFilter::getConfig(int width)
 }
 
 // Flood-fill BFS speckle filter, matching official Softfilter @ 0x98849.
-//
-// Layout of working buffer (totalPixels * 7 bytes):
-//   [0 .. totalPixels*4)       = int32 labels (one per pixel)
-//   [totalPixels*4 .. tp*8)    = int32 stack (for flood-fill BFS)
-//   [tp*4 + tp*4 .. tp*4+tp*4+tp*1) = uint8 flags (one per label)
-//
-// Simplified: use separate vectors for clarity since we're not
-// memory-constrained like the original which packed everything into
-// one allocation.
+// Uses (col,row) packed as two int16 in one int32 on the stack — no divisions.
+// Single allocation: labels(int32*pixels) + stack(int32*pixels) + flags(byte*pixels).
 void SoftFilter::apply(uint16_t* depth, int width, int height,
                        uint16_t noDepthValue)
 {
-    int totalPixels = width * height;
+    int total = width * height;
     Config cfg = getConfig(width);
+    int maxDiff = cfg.maxDiff;
+    int maxSize = cfg.maxSpeckleSize;
 
-    // Labels: int32 per pixel, 0 = unlabeled
-    thread_local std::vector<int32_t> labels;
-    labels.assign(totalPixels, 0);
+    // Persistent allocation: labels + stack + flags = total * 9 bytes
+    static int lastTotal = 0;
+    static int32_t* baseBuf = nullptr;
 
-    // Flags: byte per label, 0 = valid region, 1 = speckle
-    // Max possible labels = totalPixels, but typically << that.
-    thread_local std::vector<uint8_t> flags;
-    if (static_cast<int>(flags.size()) < totalPixels + 1) {
-        flags.resize(totalPixels + 1, 0);
+    if (total != lastTotal) {
+        free(baseBuf);
+        baseBuf = static_cast<int32_t*>(malloc(static_cast<size_t>(total) * 9 + 1));
+        lastTotal = total;
     }
 
-    // BFS stack: stores packed (col | (row << 16))
-    thread_local std::vector<uint32_t> stack;
-    stack.resize(totalPixels);
+    int32_t* labels = baseBuf;
+    int32_t* stack  = labels + total;
+    uint8_t* flags  = reinterpret_cast<uint8_t*>(stack + total);
+
+    memset(labels, 0, static_cast<size_t>(total) * 4);
+    memset(flags, 0, static_cast<size_t>(total) + 1);
 
     int labelCount = 0;
 
     for (int row = 0; row < height; row++) {
+        int rowOff = row * width;
         for (int col = 0; col < width; col++) {
-            int idx = row * width + col;
-
+            int idx = rowOff + col;
             if (depth[idx] == noDepthValue) continue;
 
-            if (labels[idx] == 0) {
-                // Start flood fill
-                labelCount++;
-                int regionSize = 0;
-                labels[idx] = labelCount;
+            int lbl = labels[idx];
+            if (lbl != 0) {
+                if (flags[lbl]) depth[idx] = noDepthValue;
+                continue;
+            }
 
-                int stackPtr = 0;  // stack top
-                stack[stackPtr++] = static_cast<uint32_t>(col | (row << 16));
+            // Start flood fill
+            labelCount++;
+            labels[idx] = labelCount;
+            int sp = 0;
+            // Pack (col, row) into one int32 — col in low 16, row in high 16
+            stack[sp++] = (row << 16) | (col & 0xFFFF);
+            int regionSize = 0;
 
-                while (stackPtr > 0) {
-                    regionSize++;
+            while (sp > 0) {
+                regionSize++;
+                int packed = stack[--sp];
+                int c = packed & 0xFFFF;
+                int r = (packed >> 16) & 0xFFFF;
+                int curIdx = r * width + c;
+                int curDepth = depth[curIdx];
 
-                    uint32_t pos = stack[--stackPtr];
-                    int curCol = static_cast<int16_t>(pos & 0xFFFF);
-                    int curRow = static_cast<int16_t>((pos >> 16) & 0xFFFF);
-                    int curIdx = curRow * width + curCol;
-                    uint16_t curDepth = depth[curIdx];
-
-                    // Check 4 neighbors
-                    // Right
-                    if (curCol < width - 1) {
-                        int nIdx = curIdx + 1;
-                        if (labels[nIdx] == 0 && depth[nIdx] != noDepthValue &&
-                            std::abs(static_cast<int>(curDepth) - static_cast<int>(depth[nIdx])) <= cfg.maxDiff) {
-                            labels[nIdx] = labelCount;
-                            stack[stackPtr++] = static_cast<uint32_t>((curCol + 1) | (curRow << 16));
-                        }
-                    }
-                    // Left
-                    if (curCol > 0) {
-                        int nIdx = curIdx - 1;
-                        if (labels[nIdx] == 0 && depth[nIdx] != noDepthValue &&
-                            std::abs(static_cast<int>(curDepth) - static_cast<int>(depth[nIdx])) <= cfg.maxDiff) {
-                            labels[nIdx] = labelCount;
-                            stack[stackPtr++] = static_cast<uint32_t>((curCol - 1) | (curRow << 16));
-                        }
-                    }
-                    // Down
-                    if (curRow < height - 1) {
-                        int nIdx = curIdx + width;
-                        if (labels[nIdx] == 0 && depth[nIdx] != noDepthValue &&
-                            std::abs(static_cast<int>(curDepth) - static_cast<int>(depth[nIdx])) <= cfg.maxDiff) {
-                            labels[nIdx] = labelCount;
-                            stack[stackPtr++] = static_cast<uint32_t>(curCol | ((curRow + 1) << 16));
-                        }
-                    }
-                    // Up
-                    if (curRow > 0) {
-                        int nIdx = curIdx - width;
-                        if (labels[nIdx] == 0 && depth[nIdx] != noDepthValue &&
-                            std::abs(static_cast<int>(curDepth) - static_cast<int>(depth[nIdx])) <= cfg.maxDiff) {
-                            labels[nIdx] = labelCount;
-                            stack[stackPtr++] = static_cast<uint32_t>(curCol | ((curRow - 1) << 16));
-                        }
+                // Right
+                if (c < width - 1) {
+                    int ni = curIdx + 1;
+                    if (!labels[ni] && depth[ni] != noDepthValue &&
+                        abs(curDepth - depth[ni]) <= maxDiff) {
+                        labels[ni] = labelCount;
+                        stack[sp++] = (r << 16) | ((c + 1) & 0xFFFF);
                     }
                 }
-
-                // Classify region
-                if (regionSize <= cfg.maxSpeckleSize) {
-                    // Speckle
-                    if (labelCount < static_cast<int>(flags.size())) {
-                        flags[labelCount] = 1;
-                    }
-                    depth[idx] = noDepthValue;
-                } else {
-                    // Valid
-                    if (labelCount < static_cast<int>(flags.size())) {
-                        flags[labelCount] = 0;
+                // Left
+                if (c > 0) {
+                    int ni = curIdx - 1;
+                    if (!labels[ni] && depth[ni] != noDepthValue &&
+                        abs(curDepth - depth[ni]) <= maxDiff) {
+                        labels[ni] = labelCount;
+                        stack[sp++] = (r << 16) | ((c - 1) & 0xFFFF);
                     }
                 }
+                // Down
+                if (r < height - 1) {
+                    int ni = curIdx + width;
+                    if (!labels[ni] && depth[ni] != noDepthValue &&
+                        abs(curDepth - depth[ni]) <= maxDiff) {
+                        labels[ni] = labelCount;
+                        stack[sp++] = (((r + 1) << 16) | (c & 0xFFFF));
+                    }
+                }
+                // Up
+                if (r > 0) {
+                    int ni = curIdx - width;
+                    if (!labels[ni] && depth[ni] != noDepthValue &&
+                        abs(curDepth - depth[ni]) <= maxDiff) {
+                        labels[ni] = labelCount;
+                        stack[sp++] = (((r - 1) << 16) | (c & 0xFFFF));
+                    }
+                }
+            }
+
+            // Classify region
+            if (regionSize <= maxSize) {
+                flags[labelCount] = 1;   // speckle
+                depth[idx] = noDepthValue;
             } else {
-                // Already labeled — check flag
-                int lbl = labels[idx];
-                if (lbl > 0 && lbl < static_cast<int>(flags.size()) && flags[lbl] != 0) {
-                    depth[idx] = noDepthValue;
-                }
+                flags[labelCount] = 0;   // valid
             }
         }
     }

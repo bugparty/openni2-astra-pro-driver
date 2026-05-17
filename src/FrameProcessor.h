@@ -22,6 +22,10 @@ public:
     // data/size point into internal buffer (valid until next getLatestFrame).
     bool getLatestFrame(uint8_t** data, int* size);
 
+    // Post-process frame on consumer thread (e.g., SoftFilter).
+    // Called by getLatestFrame before returning. Default is no-op.
+    virtual void postProcessFrame(uint8_t* data, int size) {}
+
     // Set frame dimensions
     void setResolution(int width, int height);
     int width() const { return width_; }

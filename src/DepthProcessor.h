@@ -35,6 +35,9 @@ public:
     // Enable/disable SoftFilter speckle removal (default: true)
     void setSoftFilterEnabled(bool enabled);
 
+    // Post-process: run SoftFilter on consumer thread
+    void postProcessFrame(uint8_t* data, int size) override;
+
 protected:
     void processFramePacketChunk(const PacketHeader& header,
                                   const uint8_t* data,
@@ -101,18 +104,4 @@ private:
 
     // SoftFilter speckle removal
     bool softFilterEnabled_ = true;
-
-    // --- First-frame diagnostics ---
-    bool shiftDiagDone_ = false;
-    struct ShiftAccum {
-        uint32_t count = 0, validCount = 0;
-        uint16_t minShift = 0xFFFF, maxShift = 0;
-        int hist[16] = {};  // 128-wide buckets: [0-127],[128-255],...,[1920-2047]
-    };
-    ShiftAccum shiftAccum_;
-
-    // --- Per-frame packet accounting ---
-    int frameDiagCount_ = 0;
-    int frameDiagPacketCount_ = 0;
-    int frameDiagDataBytes_ = 0;
 };
