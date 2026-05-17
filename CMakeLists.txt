@@ -86,11 +86,30 @@ set_target_properties(oni_driver_astra PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-# Install driver .so and .ini to OpenNI2 Drivers directory
-set(OPENNI2_DRIVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../AstraSDK-v2.1.3/lib/Plugins/openni2" CACHE PATH "OpenNI2 drivers directory")
+# Install driver .so and .ini to OpenNI2 Drivers directory.
+# OpenNI2 loads every *.so it finds in <libOpenNI2.so dir>/OpenNI2/Drivers/, so
+# the install target and the post-build copy below must both write there — not
+# to the parent plugin dir.
+set(OPENNI2_DRIVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../AstraSDK-v2.1.3/lib/Plugins/openni2/OpenNI2/Drivers" CACHE PATH "OpenNI2 drivers directory")
 
-install(TARGETS oni_driver_astra LIBRARY DESTINATION ${OPENNI2_DRIVERS_DIR})
+# OpenNI2's plugin loader only picks up files matching `lib*.so`, so the
+# installed name must start with `lib` even though the target build artifact
+# is `oni_driver_astra.so` (PREFIX="").
+set(INSTALLED_DRIVER_NAME "libAstraDriver.so")
+
+install(FILES $<TARGET_FILE:oni_driver_astra>
+    DESTINATION ${OPENNI2_DRIVERS_DIR}
+    RENAME ${INSTALLED_DRIVER_NAME})
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/astra.ini DESTINATION ${OPENNI2_DRIVERS_DIR})
+
+# Post-build: refresh the loaded driver every rebuild so test programs pick up
+# the latest binary without a separate `cmake --install` step.
+add_custom_command(TARGET oni_driver_astra POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:oni_driver_astra>
+        ${OPENNI2_DRIVERS_DIR}/${INSTALLED_DRIVER_NAME}
+    COMMENT "Installing ${INSTALLED_DRIVER_NAME} to ${OPENNI2_DRIVERS_DIR}"
+)
 
 # Standalone test for FirmwareCmd (requires real hardware)
 add_executable(test_firmware_cmd

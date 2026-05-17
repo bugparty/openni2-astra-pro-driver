@@ -68,10 +68,27 @@ void DepthProcessor::setSoftFilterEnabled(bool enabled)
 
 void DepthProcessor::postProcessFrame(uint8_t* data, int size)
 {
-    if (!softFilterEnabled_) return;
     int pixels = size / 2;
-    if (pixels != width() * height()) return;
-    SoftFilter::apply(reinterpret_cast<uint16_t*>(data), width(), height(), NO_DEPTH_VALUE);
+    if (pixels <= 0) return;
+    uint16_t* buf = reinterpret_cast<uint16_t*>(data);
+
+    // SoftFilter runs in shift-space (before S2D) so maxDiff=4 means 4 shift
+    // units. This matches the official driver which calls filterSpeckles on the
+    // raw Unpack11to16 output before XnShiftToDepthConvert. In depth-space at
+    // 2m each shift step is ~12mm, so maxDiff=4mm would strand every shift band
+    // as an isolated region and produce concentric-square artifacts.
+    // ASTRA_SOFTFILTER=0 disables SoftFilter at runtime for A/B testing.
+    static const char* sfEnv = getenv("ASTRA_SOFTFILTER");
+    bool sfOn = softFilterEnabled_ && !(sfEnv && sfEnv[0] == '0');
+    if (sfOn && pixels == width() * height()) {
+        SoftFilter::apply(buf, width(), height(), 0);  // 0 = no shift (no data)
+    }
+
+    // Always apply S2D, even on short frames — buffer must contain depths,
+    // not shifts, when delivered to the consumer.
+    for (int i = 0; i < pixels; i++) {
+        buf[i] = applyShiftToDepth(buf[i]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,31 +340,23 @@ void DepthProcessor::unpack11to16(const uint8_t* input, int inputSize)
 
     uint16_t* output = reinterpret_cast<uint16_t*>(writeBuffer_.data() + bytesWritten_);
 
-    // Convert 11-bit packed data into 16-bit shorts through ShiftToDepth LUT
+    // Unpack 11-bit packed data into raw shift values (S2D applied later in
+    // postProcessFrame, after SoftFilter runs in shift-space).
     // Bit layout per 11-byte group -> 8 pixels:
     //   input:  0,  1,  2,3,  4,  5,  6,7,  8,  9,10
     //   bits:  8,3,5,6,2,8,1,7,4,4,7,1,8,2,6,5,3,8
     //   output: 0,  1,    2,  3,  4,    5,  6,  7
     for (uint32_t nElem = 0; nElem < nElements; ++nElem) {
-        uint16_t raw0 = (TAKE_BITS(input[0], 8, 0) << 3) | TAKE_BITS(input[1], 3, 5);
-        uint16_t raw1 = (TAKE_BITS(input[1], 5, 0) << 6) | TAKE_BITS(input[2], 6, 2);
-        uint16_t raw2 = (TAKE_BITS(input[2], 2, 0) << 9) |
+        output[0] = (TAKE_BITS(input[0], 8, 0) << 3) | TAKE_BITS(input[1], 3, 5);
+        output[1] = (TAKE_BITS(input[1], 5, 0) << 6) | TAKE_BITS(input[2], 6, 2);
+        output[2] = (TAKE_BITS(input[2], 2, 0) << 9) |
             (TAKE_BITS(input[3], 8, 0) << 1) | TAKE_BITS(input[4], 1, 7);
-        uint16_t raw3 = (TAKE_BITS(input[4], 7, 0) << 4) | TAKE_BITS(input[5], 4, 4);
-        uint16_t raw4 = (TAKE_BITS(input[5], 4, 0) << 7) | TAKE_BITS(input[6], 7, 1);
-        uint16_t raw5 = (TAKE_BITS(input[6], 1, 0) << 10) |
+        output[3] = (TAKE_BITS(input[4], 7, 0) << 4) | TAKE_BITS(input[5], 4, 4);
+        output[4] = (TAKE_BITS(input[5], 4, 0) << 7) | TAKE_BITS(input[6], 7, 1);
+        output[5] = (TAKE_BITS(input[6], 1, 0) << 10) |
             (TAKE_BITS(input[7], 8, 0) << 2) | TAKE_BITS(input[8], 2, 6);
-        uint16_t raw6 = (TAKE_BITS(input[8], 6, 0) << 5) | TAKE_BITS(input[9], 5, 3);
-        uint16_t raw7 = (TAKE_BITS(input[9], 3, 0) << 8) | TAKE_BITS(input[10], 8, 0);
-
-        output[0] = applyShiftToDepth(raw0);
-        output[1] = applyShiftToDepth(raw1);
-        output[2] = applyShiftToDepth(raw2);
-        output[3] = applyShiftToDepth(raw3);
-        output[4] = applyShiftToDepth(raw4);
-        output[5] = applyShiftToDepth(raw5);
-        output[6] = applyShiftToDepth(raw6);
-        output[7] = applyShiftToDepth(raw7);
+        output[6] = (TAKE_BITS(input[8], 6, 0) << 5) | TAKE_BITS(input[9], 5, 3);
+        output[7] = (TAKE_BITS(input[9], 3, 0) << 8) | TAKE_BITS(input[10], 8, 0);
 
         input += PACKED11_INPUT_SIZE;
         output += PACKED11_OUTPUT_SIZE;

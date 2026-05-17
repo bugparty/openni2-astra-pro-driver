@@ -9,7 +9,7 @@ static constexpr uint16_t ASTRA_VID = 0x2bc5;
 AstraDriver::AstraDriver(OniDriverServices* pDriverServices)
     : DriverBase(pDriverServices)
 {
-    fprintf(stderr, "=== AstraDriver (custom) BUILD: 2026-05-16e S2D: PrimeSense(ZPD=130 ZPPS=0.114 DCL=7.5 CS=200 SC=10) maxD=10000 noSF ===\n");
+    fprintf(stderr, "=== AstraDriver (custom) BUILD: 2026-05-17b S2D: PrimeSense(ZPD=130 ZPPS=0.114 DCL=7.5 CS=200 SC=10) maxD=10000 SF=shift-space ===\n");
 }
 
 AstraDriver::~AstraDriver()
